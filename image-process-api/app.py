@@ -1,6 +1,7 @@
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html
 from typing import List
 import os
 import base64
@@ -9,9 +10,10 @@ import cv2
 import numpy as np
 from factories.FilterFactory import FilterFactory
 from services.IService import IService
+from typing import List
+from pydantic import BaseModel
 
-
-app = FastAPI()
+app = FastAPI(swagger_ui_parameters={"syntaxHighlight": False})
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,50 +62,81 @@ async def applyToImage(
     return JSONResponse(content={"filtered_images": result})
 
 
-from typing import List
-from pydantic import BaseModel
-
-
 class DatasetFilterRequest(BaseModel):
     input_folder: str
-    filter_name: str
+    filterName: str
 
 
-@app.post("/applyToDataset")
-async def apply_to_dataset(request: DatasetFilterRequest):
-    input_folder = request.input_folder
-    filter_name = request.filter_name
+@app.get("/checkDataset")
+async def checkDataset(folderPath: str = ""):
+    if not os.path.exists(folderPath):
+        raise HTTPException(status_code=404, detail="Belirtilen klasör bulunamadı.")
 
-    output_folder = os.path.join(input_folder, "../outputImages", filter_name)
-    os.makedirs(output_folder, exist_ok=True)
+    if not os.path.isdir(folderPath):
+        raise HTTPException(status_code=400, detail="Belirtilen yol bir klasör değil.")
 
-    images: List[str] = [
-        f
-        for f in os.listdir(input_folder)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ][:4]
+    validExtensions = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tiff")
+    images = [
+        file
+        for file in os.listdir(folderPath)
+        if file.lower().endswith(validExtensions)
+    ]
 
     if not images:
         raise HTTPException(
-            status_code=400, detail="No valid images found in the input folder."
+            status_code=404, detail="Klasörde herhangi bir resim bulunamadı."
         )
 
-    service: IService = FilterFactory().createInstance(filter_name)
+    return JSONResponse(content={"imageCount": len(images)}, status_code=200)
 
-    for image_name in images:
-        print("Processing:", image_name)
-        image_path = os.path.join(input_folder, image_name)
 
-        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            print(f"Failed to load image: {image_name}. Skipping...")
-            continue
+@app.post("/applyToDataset")
+async def applyToDataset(request: DatasetFilterRequest):
+    try:
+        inputFolder = request.input_folder
+        filterName = request.filterName
+        print(filterName)
+        outputFolder = os.path.join(inputFolder, "../outputImages", filterName)
+        os.makedirs(outputFolder, exist_ok=True)
 
-        filtered_image = service.filterImage(img)
+        images: List[str] = [
+            f
+            for f in os.listdir(inputFolder)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ]
 
-        output_image_path = os.path.join(output_folder, f"{filter_name}_{image_name}")
-        cv2.imwrite(output_image_path, filtered_image)
+        if not images:
+            raise HTTPException(
+                status_code=400, detail="Klasörde herhangi bir resim bulunamadı."
+            )
+        try:
+            service: IService = FilterFactory().createInstance(filterName)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        for imageName in images:
+            print("Processing:", imageName)
+            image_path = os.path.join(inputFolder, imageName)
+
+            img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                print(f"Resim yüklenemedi: {imageName}.")
+                continue
+            filtered_image = service.filterImage(img)
+
+            output_image_path = os.path.join(outputFolder, f"{filterName}_{imageName}")
+            cv2.imwrite(output_image_path, filtered_image)
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail="Beklenmedik bir hata meydana geldi"
+        )
 
     return JSONResponse(
-        content={"filtered_images": "Processing completed successfully."}
+        content={
+            "message": "İşlem başarılı bir şekilde tamamlandı",
+        },
+        status_code=200,
     )
